@@ -12,6 +12,8 @@ import { chromium } from 'patchright'
 import sharp from 'sharp'
 
 import type {
+  AmazonBookInfo,
+  AmazonBookMeta,
   AmazonRenderLocationMap,
   AmazonRenderToc,
   AmazonRenderTocItem,
@@ -340,16 +342,45 @@ async function main() {
     await delay(200)
     await page.locator('ion-button[aria-label="Reader menu"]').click()
     await delay(500)
-    await page
-      .locator('ion-item[role="listitem"]', { hasText: 'Go to Page' })
-      .click()
-    await page
-      .locator('ion-modal input[placeholder="page number"]')
-      .fill(`${pageNumber}`)
-    // await page.locator('ion-modal button', { hasText: 'Go' }).click()
-    await page
-      .locator('ion-modal ion-button[item-i-d="go-to-modal-go-button"]')
-      .click()
+    const goToPageAction = page
+      .locator('ion-item[role="listitem"], ion-item, [role="menuitem"], button')
+      .filter({ hasText: /go to page/i })
+      .first()
+    if ((await goToPageAction.count()) === 0) {
+      console.warn(
+        '(warning) Could not find "Go to Page" action in reader menu; continuing from current page.'
+      )
+      await page.keyboard.press('Escape')
+      return
+    }
+
+    await goToPageAction.click()
+    const pageNumberInput = page
+      .locator('ion-modal input[placeholder="page number"], ion-modal input')
+      .first()
+    if ((await pageNumberInput.count()) === 0) {
+      console.warn(
+        '(warning) Could not find page number input in Go to Page modal; continuing from current page.'
+      )
+      await page.keyboard.press('Escape')
+      return
+    }
+    await pageNumberInput.fill(`${pageNumber}`)
+
+    const goButton = page
+      .locator(
+        'ion-modal ion-button[item-i-d="go-to-modal-go-button"], ion-modal button, ion-modal ion-button'
+      )
+      .filter({ hasText: /^go$/i })
+      .first()
+    if ((await goButton.count()) === 0) {
+      console.warn(
+        '(warning) Could not find Go button in Go to Page modal; continuing from current page.'
+      )
+      await page.keyboard.press('Escape')
+      return
+    }
+    await goButton.click()
     await delay(500)
   }
 
@@ -440,7 +471,64 @@ async function main() {
 
   // At this point, we should have recorded all the base book metadata from the
   // initial network requests.
-  assert(result.info, 'expected book info to be initialized')
+  if (!result.info) {
+    console.warn(
+      '(warning) Missing reader start info; continuing with synthesized fallback metadata.'
+    )
+    result.info = {
+      clippingLimit: 0,
+      contentChecksum: null,
+      contentType: 'ebook',
+      contentVersion: '',
+      deliveredAsin: asin,
+      downloadRestrictionReason: null,
+      expirationDate: null,
+      format: '',
+      formatVersion: '',
+      fragmentMapUrl: null,
+      hasAnnotations: false,
+      isOwned: true,
+      isSample: false,
+      kindleSessionId: '',
+      lastPageReadData: {
+        deviceName: '',
+        position: initialPageNav?.location ?? -1,
+        syncTime: Date.now()
+      },
+      manifestUrl: null,
+      originType: '',
+      pageNumberUrl: null,
+      requestedAsin: asin,
+      srl: 0
+    } satisfies AmazonBookInfo
+  }
+  if (!result.meta) {
+    console.warn(
+      '(warning) Missing YJ metadata; continuing with synthesized fallback metadata.'
+    )
+    result.meta = {
+      ACR: '',
+      asin,
+      authorList: ['Unknown Author'],
+      bookSize: '',
+      bookType: 'ebook',
+      cover: '',
+      language: '',
+      positions: {
+        cover: 0,
+        srl: 0,
+        toc: 0
+      },
+      publisher: '',
+      refEmId: '',
+      releaseDate: '',
+      sample: false,
+      title: `Kindle Book ${asin}`,
+      version: '',
+      startPosition: result.nav.startPosition,
+      endPosition: result.nav.endPosition
+    } satisfies AmazonBookMeta
+  }
   assert(result.meta, 'expected book meta to be initialized')
   assert(result.toc?.length, 'expected book toc to be initialized')
   assert(result.locationMap, 'expected book location map to be initialized')
@@ -484,13 +572,11 @@ async function main() {
 
   // Loop through each page of the book
   do {
-    const pageNav = await getPageNav()
+    const parsedPageNav = await getPageNav()
+    const currentPage =
+      parsedPageNav?.page ?? (result.pages.at(-1)?.page ?? 0) + 1
 
-    if (pageNav?.page === undefined) {
-      break
-    }
-
-    if (pageNav.page > result.nav.totalNumContentPages) {
+    if (currentPage > result.nav.totalNumContentPages) {
       break
     }
 
@@ -524,7 +610,7 @@ async function main() {
 
       assert(
         blob,
-        `no blob found for src: ${src} (index ${index}; page ${pageNav.page})`
+        `no blob found for src: ${src} (index ${index}; page ${currentPage})`
       )
 
       const rawRenderedImage = Buffer.from(blob.base64, 'base64')
@@ -545,21 +631,21 @@ async function main() {
 
     assert(
       renderedPageImageBuffer,
-      `no buffer found for src: ${src} (index ${index}; page ${pageNav.page})`
+      `no buffer found for src: ${src} (index ${index}; page ${currentPage})`
     )
 
     const screenshotPath = path.join(
       pageScreenshotsDir,
       `${index}`.padStart(pageNumberPaddingAmount, '0') +
         '-' +
-        `${pageNav.page}`.padStart(pageNumberPaddingAmount, '0') +
+        `${currentPage}`.padStart(pageNumberPaddingAmount, '0') +
         '.png'
     )
 
     await fs.writeFile(screenshotPath, renderedPageImageBuffer)
     const pageChunk = {
       index,
-      page: pageNav.page,
+      page: currentPage,
       screenshot: screenshotPath
     }
     result.pages.push(pageChunk)
@@ -580,7 +666,11 @@ async function main() {
           .locator('.kr-chevron-container-right')
           .click({ timeout: 5000 })
       } catch (err: any) {
-        console.warn('unable to click next page button', err.message, pageNav)
+        console.warn(
+          'unable to click next page button',
+          err.message,
+          parsedPageNav
+        )
         navigationTimeout = 1000
       }
 
@@ -610,7 +700,10 @@ async function main() {
       }
 
       if (++retries >= 30) {
-        console.warn('unable to navigate to next page; breaking...', pageNav)
+        console.warn(
+          'unable to navigate to next page; breaking...',
+          parsedPageNav ?? { page: currentPage }
+        )
         done = true
         break
       }

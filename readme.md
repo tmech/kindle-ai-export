@@ -28,13 +28,13 @@
 
 ## Intro
 
-This project makes it easy to export the contents of any ebook in your Kindle library as text, PDF, EPUB, or as a custom, AI-narrated audiobook. It only requires a valid Amazon Kindle account and an OpenAI API key.
+This project makes it easy to export the contents of any ebook in your Kindle library as text, PDF, EPUB, or as a custom, AI-narrated audiobook. It only requires a valid Amazon Kindle account and either an Azure AI Foundry Local endpoint or an OpenAI API key.
 
 _You must own the ebook on Kindle for this project to work._
 
 ### How does it work?
 
-It works by logging into your [Kindle web reader](https://read.amazon.com) account using [Playwright](https://playwright.dev), exporting each page of a book as a PNG image, and then using a vLLM (defaulting to `gpt-4.1-mini`) to transcribe the text from each page to text. Once we have the raw book contents and metadata, then it's easy to convert it to PDF, EPUB, etc. 🔥
+It works by logging into your [Kindle web reader](https://read.amazon.com) account using [Playwright](https://playwright.dev), exporting each page of a book as a PNG image, and then using a vLLM (defaulting to `qwen3-vl-2b-instruct` on Foundry Local) to transcribe the text from each page to text. Once we have the raw book contents and metadata, then it's easy to convert it to PDF, EPUB, etc. 🔥
 
 This [example](./examples/B0819W19WD) uses the first page of the scifi book [Revelation Space](https://www.amazon.com/gp/product/B0819W19WD?ref_=dbs_m_mng_rwt_calw_tkin_0&storeType=ebooks) by [Alastair Reynolds](https://www.goodreads.com/author/show/51204.Alastair_Reynolds):
 
@@ -66,7 +66,7 @@ This [example](./examples/B0819W19WD) uses the first page of the scifi book [Rev
     </tr>
     <tr>
       <td>
-        We then convert each page's screenshot into text using one of OpenAI's vLLMs (<strong>gpt-4.1-mini</strong>.
+        We then convert each page's screenshot into text using a multimodal vLLM (for example, <strong>qwen3-vl-2b-instruct</strong> on Foundry Local).
       </td>
       <td>
         <p>Mantell Sector, North Nekhebet, Resurgam, Delta Pavonis system, 2551</p>
@@ -147,13 +147,15 @@ I also created an [OSS TypeScript client for the unofficial Kindle API](https://
 
 ## Usage
 
-Make sure you have `node >= 18` and [pnpm](https://pnpm.io) installed.
+Make sure you have `node >= 20` and [pnpm](https://pnpm.io) installed.
 
 1. Clone this repo
 2. Run `pnpm install`
 3. Set up environment variables ([details](#setup-env-vars))
 4. Run `src/extract-kindle-book.ts` ([details](#extract-kindle-book))
 5. Run `src/transcribe-book-content.ts` ([details](#transcribe-book-content))
+   - Default flow: `TRANSCRIBE_PROVIDER=foundrylocal` (no OpenAI key needed for transcription)
+   - Optional: use `TRANSCRIBE_PROVIDER=openai` if you prefer OpenAI-hosted transcription
 6. (Optional) Run `src/export-book-pdf.ts` ([details](#optional-export-book-as-pdf))
 7. (Optional) Export book as EPUB ([details](#optional-export-book-as-epub))
 8. (Optional) Run `src/export-book-markdown.ts` ([details](#optional-export-book-as-markdown))
@@ -168,6 +170,22 @@ AMAZON_EMAIL=
 AMAZON_PASSWORD=
 ASIN=
 
+# Transcription provider config
+TRANSCRIBE_PROVIDER=foundrylocal
+TRANSCRIBE_MODEL=qwen3-vl-2b-instruct
+TRANSCRIBE_MAX_RETRIES=20
+TRANSCRIBE_CONCURRENCY=2
+
+# Required when TRANSCRIBE_PROVIDER=foundrylocal
+FOUNDRY_LOCAL_APP_NAME=kindle-ai-export
+FOUNDRY_LOCAL_LOG_LEVEL=warn
+
+# Optional when TRANSCRIBE_PROVIDER=foundrylocal
+FOUNDRY_LOCAL_MODEL_VARIANT=
+FOUNDRY_LOCAL_API_KEY=local
+
+# Required when TRANSCRIBE_PROVIDER=openai
+# Also required for OpenAI TTS in audiobook export mode
 OPENAI_API_KEY=
 ```
 
@@ -180,7 +198,7 @@ npx tsx src/extract-kindle-book.ts
 ```
 
 - _(This takes a few minutes to run)_
-- This logs into your [Amazon Kindle web reader](https://read.amazon.com) using headless Chrome ([Playwright](https://playwright.dev)). It can be pretty fun to watch it run, so feel free to tweak the script to use `headless: false` to watch it do its thing.
+- This logs into your [Amazon Kindle web reader](https://read.amazon.com) using automated Chrome via [Patchright/Playwright](https://playwright.dev). The browser runs visibly by default so you can watch it work.
 - If your account requires 2FA, the terminal will request a code from you before proceeding.
 - It uses a persistent browser session, so you should only have to auth once.
 - Once logged in, it navigates to the web reader page for a specific book (`https://read.amazon.com/?asin=${ASIN}`).
@@ -202,8 +220,26 @@ npx tsx src/transcribe-book-content.ts
 ```
 
 - _(This takes a few minutes to run)_
-- This takes each of the page screenshots and runs them through a vLLM (defaulting to `gpt-4.1-mini`) to extract the raw text content from each page of the book.
+- This takes each of the page screenshots and runs them through a vLLM to extract the raw text content from each page of the book.
+- It supports two transcription providers:
+  - `TRANSCRIBE_PROVIDER=foundrylocal` (default), using the in-process [Foundry Local TypeScript SDK](https://github.com/microsoft/Foundry-Local/).
+  - `TRANSCRIBE_PROVIDER=openai`, using OpenAI's hosted API.
+- If Foundry SDK fails to locate native binaries, run:
+  - `pnpm approve-builds` (allow `foundry-local-sdk`)
+  - `pnpm rebuild foundry-local-sdk`
+- In Foundry mode, the SDK automatically downloads and loads `TRANSCRIBE_MODEL` if needed.
+- By default, transcription auto-selects a GPU variant when one is available.
+- You can optionally set `FOUNDRY_LOCAL_MODEL_VARIANT` to pin a specific variant ID (for example forcing CPU or a specific GPU build).
+- `TRANSCRIBE_CONCURRENCY` controls parallel page transcriptions (defaults to `2` for Foundry Local and `16` for OpenAI).
+- You can configure the model with `TRANSCRIBE_MODEL=...`.
+  - Recommended Foundry Local vision aliases:
+    - `qwen3-vl-2b-instruct` (default)
+    - `qwen3-vl-4b-instruct`
+    - `qwen3-vl-8b-instruct`
+- If model load fails with parser fields like `spatial_merge_size` or `image_token_id`, your Foundry runtime/model pack versions are out of sync; update Foundry Local and retry.
 - It then stitches these text chunks together, taking into account chapter boundaries.
+- Runtime logs are written to both the console and `out/${asin}/transcribe.log`.
+- Foundry Local internal SDK/runtime logs are written under your user profile at `~/.kindle-ai-export/logs` by default.
 - The result is stored as JSON to `out/${asin}/content.json`.
 - Example: [examples/B0819W19WD/content.json](./examples/B0819W19WD/content.json)
 

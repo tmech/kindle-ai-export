@@ -1,5 +1,8 @@
 enablePrePostScripts: true
 
+ignoredBuiltDependencies:
+  - foundry-local-sdk
+
 minimumReleaseAge: 1440
 
 minimumReleaseAgeExclude:

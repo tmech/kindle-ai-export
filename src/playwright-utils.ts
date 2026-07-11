@@ -4,6 +4,20 @@ import { assert, deromanize } from './utils'
 
 export function parsePageNav(text: string | null): PageNav | undefined {
   {
+    // Parse compact page format
+    const match = text?.match(/page\s+(\d+)\s*\/\s*(\d+)/i)
+    if (match) {
+      const page = Number.parseInt(match?.[1]!)
+      const total = Number.parseInt(match?.[2]!)
+      if (Number.isNaN(page) || Number.isNaN(total)) {
+        return undefined
+      }
+
+      return { page, total }
+    }
+  }
+
+  {
     // Parse normal page locations
     const match = text?.match(/page\s+(\d+)\s+of\s+(\d+)/i)
     if (match) {
@@ -14,6 +28,20 @@ export function parsePageNav(text: string | null): PageNav | undefined {
       }
 
       return { page, total }
+    }
+  }
+
+  {
+    // Parse compact location format
+    const match = text?.match(/location\s+(\d+)\s*\/\s*(\d+)/i)
+    if (match) {
+      const location = Number.parseInt(match?.[1]!)
+      const total = Number.parseInt(match?.[2]!)
+      if (Number.isNaN(location) || Number.isNaN(total)) {
+        return undefined
+      }
+
+      return { location, total }
     }
   }
 
