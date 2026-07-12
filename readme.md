@@ -221,9 +221,10 @@ npx tsx src/transcribe-book-content.ts
 
 - _(This takes a few minutes to run)_
 - This takes each of the page screenshots and runs them through a vLLM to extract the raw text content from each page of the book.
-- It supports two transcription providers:
+- It supports three transcription providers:
   - `TRANSCRIBE_PROVIDER=foundrylocal` (default), using the in-process [Foundry Local TypeScript SDK](https://github.com/microsoft/Foundry-Local/).
   - `TRANSCRIBE_PROVIDER=openai`, using OpenAI's hosted API.
+  - `TRANSCRIBE_PROVIDER=tesseract`, using local [tesseract.js](https://github.com/naptha/tesseract.js).
 - If Foundry SDK fails to locate native binaries, run:
   - `pnpm approve-builds` (allow `foundry-local-sdk`)
   - `pnpm rebuild foundry-local-sdk`
@@ -238,6 +239,13 @@ npx tsx src/transcribe-book-content.ts
     - `qwen3-vl-8b-instruct`
 - If model load fails with parser fields like `spatial_merge_size` or `image_token_id`, your Foundry runtime/model pack versions are out of sync; update Foundry Local and retry.
 - It then stitches these text chunks together, taking into account chapter boundaries.
+- Transcription is restartable: reruns resume from pages already present in `out/${asin}/content.json`.
+- Figure detection is enabled by default (`TRANSCRIBE_DETECT_FIGURES=true`) and saves crops under `out/${asin}/figures/` with metadata in `out/${asin}/figures.json`.
+- You can tune figure extraction with:
+  - `TRANSCRIBE_MIN_FIGURE_AREA_RATIO` (default `0.015`)
+  - `TRANSCRIBE_MIN_FIGURE_EDGE` (default `80`)
+  - `TRANSCRIBE_MIN_FIGURE_STDEV` (default `6`)
+  - `TRANSCRIBE_MIN_TEXT_BOX_CONFIDENCE` (default `15`)
 - Runtime logs are written to both the console and `out/${asin}/transcribe.log`.
 - Foundry Local internal SDK/runtime logs are written under your user profile at `~/.kindle-ai-export/logs` by default.
 - The result is stored as JSON to `out/${asin}/content.json`.
@@ -273,7 +281,11 @@ npx tsx src/export-book-markdown.ts
 ```
 
 - _(This should run instantly)_
-- The result is stored to `out/${asin}/book.md`.
+- The root TOC is written to `out/${asin}/book.md`.
+- One markdown file is created per chapter in `out/${asin}/chapters/`.
+- Both the root note and chapter notes include YAML frontmatter for Obsidian compatibility.
+  - Frontmatter includes `asin`, title/author fields, chapter metadata, Kindle position ranges, and paper page ranges when available.
+- Detected figures are embedded in chapter markdown when available.
 - Example: [examples/B0819W19WD/book-preview.md](./examples/B0819W19WD/book-preview.md)
 
 ### (Optional) Export Book as AI-Narrated Audiobook 🔥

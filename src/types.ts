@@ -34,6 +34,32 @@ export interface ContentChunk {
   screenshot: string
 }
 
+export interface OCRBox {
+  bbox: {
+    x0: number
+    y0: number
+    x1: number
+    y1: number
+  }
+  confidence: number
+}
+
+export interface FigureRegion {
+  index: number
+  page: number
+  figure: number
+  areaRatio: number
+  bbox: {
+    x0: number
+    y0: number
+    x1: number
+    y1: number
+  }
+  screenshot: string
+  imagePath: string
+  captionHint?: string
+}
+
 export interface PageNav {
   page?: number
   location?: number

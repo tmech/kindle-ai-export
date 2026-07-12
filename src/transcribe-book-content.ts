@@ -8,18 +8,29 @@ import { inspect } from 'node:util'
 import { FoundryLocalManager, type IModel } from 'foundry-local-sdk'
 import { OpenAIClient } from 'openai-fetch'
 import pMap from 'p-map'
+import { createWorker, OEM } from 'tesseract.js'
 
-import type { BookMetadata, ContentChunk, TocItem } from './types'
-import { assert, getEnv, readJsonFile } from './utils'
+import type {
+  BookMetadata,
+  ContentChunk,
+  FigureRegion,
+  OCRBox,
+  TocItem
+} from './types'
+import { detectAndExtractFigureRegions } from './transcribe-figure-utils'
+import { assert, getEnv, readJsonFile, tryReadJsonFile } from './utils'
 
-type TranscribeProvider = 'openai' | 'foundrylocal'
+type TranscribeProvider = 'openai' | 'foundrylocal' | 'tesseract'
 
 type TranscriptionClient = {
-  completeChat: (args: {
-    model: string
+  transcribePage: (args: {
+    screenshotPath: string
+    imageDataUrl: string
     temperature: number
-    messages: any[]
-  }) => Promise<any>
+  }) => Promise<{
+    text: string
+    textBoxes?: OCRBox[]
+  }>
   cleanup?: () => Promise<void>
 }
 
@@ -36,6 +47,7 @@ async function main() {
     const metadata = await readJsonFile<BookMetadata>(
       path.join(outDir, 'metadata.json')
     )
+    const contentPath = path.join(outDir, 'content.json')
     assert(metadata.pages?.length, 'no page screenshots found')
     assert(metadata.toc?.length, 'invalid book metadata: missing toc')
 
@@ -54,7 +66,8 @@ async function main() {
     ).toLowerCase()
     assert(
       rawTranscribeProvider === 'openai' ||
-        rawTranscribeProvider === 'foundrylocal',
+        rawTranscribeProvider === 'foundrylocal' ||
+        rawTranscribeProvider === 'tesseract',
       `Invalid transcription provider "${rawTranscribeProvider}"`
     )
     const transcribeProvider = rawTranscribeProvider as TranscribeProvider
@@ -85,128 +98,220 @@ async function main() {
       transcribeProvider,
       transcribeModel
     })
+
+    const existingContent =
+      (await tryReadJsonFile<ContentChunk[]>(contentPath)) ?? []
+    assert(
+      Array.isArray(existingContent),
+      `Invalid content file: ${contentPath}`
+    )
+    const contentByIndex = new Map<number, ContentChunk>()
+    for (const chunk of existingContent) {
+      contentByIndex.set(chunk.index, chunk)
+    }
+    const figuresPath = path.join(outDir, 'figures.json')
+    const figuresDir = path.join(outDir, 'figures')
+    const detectFigures = getEnv('TRANSCRIBE_DETECT_FIGURES') !== 'false'
+    const existingFigures =
+      (await tryReadJsonFile<FigureRegion[]>(figuresPath)) ?? []
+    assert(
+      Array.isArray(existingFigures),
+      `Invalid figures file: ${figuresPath}`
+    )
+    const figuresByIndex = new Map<number, FigureRegion[]>()
+    for (const figure of existingFigures) {
+      const pageFigures = figuresByIndex.get(figure.index) ?? []
+      pageFigures.push(figure)
+      figuresByIndex.set(figure.index, pageFigures)
+    }
+
+    const pagesToTranscribe = metadata.pages.filter(
+      (pageChunk) => !contentByIndex.has(pageChunk.index)
+    )
+
+    if (pagesToTranscribe.length < metadata.pages.length) {
+      console.log(
+        `Resuming transcription: ${contentByIndex.size}/${metadata.pages.length} pages already in ${contentPath}`
+      )
+    }
+
     console.log(
       `Using transcription provider "${transcribeProvider}" with model "${transcribeModel}" and concurrency ${concurrency}`
     )
 
     const totalPages = metadata.pages.length
-    let completedPages = 0
+    let completedPages = contentByIndex.size
     let failedPages = 0
     const transcriptionStartedAt = Date.now()
+    let persistQueue = Promise.resolve<void>(undefined)
 
     try {
-      const content: ContentChunk[] = (
-        await pMap(
-          metadata.pages,
-          async (pageChunk, pageChunkIndex) => {
-            const { screenshot, index, page } = pageChunk
-            const pageStartedAt = Date.now()
-            const screenshotBuffer = await fs.readFile(screenshot)
-            const screenshotBase64 = `data:image/png;base64,${screenshotBuffer.toString('base64')}`
+      await pMap(
+        pagesToTranscribe,
+        async (pageChunk) => {
+          const { screenshot, index, page } = pageChunk
+          const pageStartedAt = Date.now()
+          const screenshotBuffer = await fs.readFile(screenshot)
+          const screenshotBase64 = `data:image/png;base64,${screenshotBuffer.toString('base64')}`
 
-            try {
-              let retries = 0
+          try {
+            let retries = 0
 
-              console.log(
-                `Transcribing page ${page} (${completedPages}/${totalPages} complete, ${totalPages - completedPages} remaining)...`
-              )
+            console.log(
+              `Transcribing page ${page} (${completedPages}/${totalPages} complete, ${totalPages - completedPages} remaining)...`
+            )
 
-              do {
-                const res = await transcriptionClient.completeChat({
-                  model: transcribeModel,
-                  temperature: retries < 2 ? 0 : 0.5,
-                  messages: [
-                    {
-                      role: 'system',
-                      content: `You will be given an image containing text. Read the text from the image and output it verbatim.
+            do {
+              const transcription = await transcriptionClient.transcribePage({
+                screenshotPath: screenshot,
+                imageDataUrl: screenshotBase64,
+                temperature: retries < 2 ? 0 : 0.5
+              })
 
-Do not include any additional text, descriptions, or punctuation. Ignore any embedded images. Do not use markdown.${retries > 2 ? '\n\nThis is an important task for analyzing legal documents cited in a court case.' : ''}`
-                    },
-                    {
-                      role: 'user',
-                      content: [
-                        {
-                          type: 'image_url',
-                          image_url: {
-                            url: screenshotBase64
-                          }
-                        }
-                      ] as any
-                    }
-                  ]
-                })
+              const rawText = transcription.text
+              let text = rawText
+                .replace(/^\s*\d+\s*$\n+/m, '')
+                .replaceAll(/^\s*/gm, '')
+                .replaceAll(/\s*$/gm, '')
 
-                const rawText = res.choices[0]!.message.content!
-                let text = rawText
-                  .replace(/^\s*\d+\s*$\n+/m, '')
-                  .replaceAll(/^\s*/gm, '')
-                  .replaceAll(/\s*$/gm, '')
+              ++retries
 
-                ++retries
-
-                if (!text) continue
-                if (text.length < 100 && /i'm sorry/i.test(text)) {
-                  if (retries >= maxRetries) {
-                    throw new Error(
-                      `Model refused too many times (${retries} times): ${text}`
-                    )
-                  }
-
-                  console.warn('retrying refusal...', {
-                    index,
-                    text,
-                    screenshot
-                  })
-                  continue
+              if (!text) {
+                if (retries >= maxRetries) {
+                  throw new Error(
+                    `Model returned no text too many times (${retries} times)`
+                  )
+                }
+                continue
+              }
+              if (text.length < 100 && /i'm sorry/i.test(text)) {
+                if (retries >= maxRetries) {
+                  throw new Error(
+                    `Model refused too many times (${retries} times): ${text}`
+                  )
                 }
 
-                const prevPageChunk = metadata.pages[pageChunkIndex - 1]
-                if (prevPageChunk && prevPageChunk.page !== page) {
-                  const tocItem = pageToTocItemMap[page]
-                  if (tocItem) {
-                    text = text.replace(
-                      // eslint-disable-next-line security/detect-non-literal-regexp
-                      new RegExp(`^${tocItem.label}\\s*`, 'i'),
-                      ''
-                    )
-                  }
-                }
-
-                const result: ContentChunk = {
+                console.warn('retrying refusal...', {
                   index,
-                  page,
                   text,
                   screenshot
+                })
+                continue
+              }
+
+              const prevPageChunk = metadata.pages[index - 1]
+              if (prevPageChunk && prevPageChunk.page !== page) {
+                const tocItem = pageToTocItemMap[page]
+                if (tocItem) {
+                  text = text.replace(
+                    // eslint-disable-next-line security/detect-non-literal-regexp
+                    new RegExp(`^${tocItem.label}\\s*`, 'i'),
+                    ''
+                  )
                 }
-                ++completedPages
-                console.log(
-                  `Transcribed page ${page} in ${formatDurationMs(
-                    Date.now() - pageStartedAt
-                  )} (${completedPages}/${totalPages} complete, ${
-                    totalPages - completedPages
-                  } remaining)`
+              }
+
+              const result: ContentChunk = {
+                index,
+                page,
+                text,
+                screenshot
+              }
+
+              const figureRegions =
+                detectFigures && transcription.textBoxes?.length
+                  ? await detectAndExtractFigureRegions({
+                      index,
+                      page,
+                      screenshotPath: screenshot,
+                      textBoxes: transcription.textBoxes,
+                      figuresDir
+                    })
+                  : []
+
+              const persistResult = persistQueue.then(async () => {
+                contentByIndex.set(index, result)
+                if (figureRegions.length) {
+                  figuresByIndex.set(index, figureRegions)
+                } else {
+                  figuresByIndex.delete(index)
+                }
+                await fs.writeFile(
+                  contentPath,
+                  JSON.stringify(
+                    Array.from(contentByIndex.values()).toSorted(
+                      (a, b) => a.index - b.index
+                    ),
+                    null,
+                    2
+                  )
                 )
-                console.log(result)
+                await fs.writeFile(
+                  figuresPath,
+                  JSON.stringify(
+                    Array.from(figuresByIndex.values())
+                      .flat()
+                      .toSorted(
+                        (a, b) =>
+                          a.index - b.index ||
+                          a.figure - b.figure ||
+                          a.page - b.page
+                      ),
+                    null,
+                    2
+                  )
+                )
+              })
+              persistQueue = persistResult.catch(() => undefined)
+              await persistResult
 
-                return result
-              } while (true)
-            } catch (err) {
-              ++failedPages
-              console.error(
-                `error processing image ${index} (${screenshot}) after ${formatDurationMs(
+              ++completedPages
+              console.log(
+                `Transcribed page ${page} in ${formatDurationMs(
                   Date.now() - pageStartedAt
-                )} (${completedPages}/${totalPages} complete, ${totalPages - completedPages} remaining)`,
-                err
+                )} (${completedPages}/${totalPages} complete, ${
+                  totalPages - completedPages
+                } remaining)`
               )
-            }
-          },
-          { concurrency }
-        )
-      ).filter(Boolean)
+              if (figureRegions.length) {
+                console.log(
+                  `Detected ${figureRegions.length} figure region(s) on page ${page}`
+                )
+              }
+              console.log(result)
 
+              return
+            } while (true)
+          } catch (err) {
+            ++failedPages
+            console.error(
+              `error processing image ${index} (${screenshot}) after ${formatDurationMs(
+                Date.now() - pageStartedAt
+              )} (${completedPages}/${totalPages} complete, ${totalPages - completedPages} remaining)`,
+              err
+            )
+          }
+        },
+        { concurrency }
+      )
+
+      await persistQueue
+      const content = Array.from(contentByIndex.values()).toSorted(
+        (a, b) => a.index - b.index
+      )
+      await fs.writeFile(contentPath, JSON.stringify(content, null, 2))
       await fs.writeFile(
-        path.join(outDir, 'content.json'),
-        JSON.stringify(content, null, 2)
+        figuresPath,
+        JSON.stringify(
+          Array.from(figuresByIndex.values())
+            .flat()
+            .toSorted(
+              (a, b) =>
+                a.index - b.index || a.figure - b.figure || a.page - b.page
+            ),
+          null,
+          2
+        )
       )
       console.log(
         `Transcription finished: ${completedPages}/${totalPages} pages complete, ${failedPages} failed, total ${formatDurationMs(
@@ -263,16 +368,81 @@ async function createTranscriptionClient({
   transcribeProvider: TranscribeProvider
   transcribeModel: string
 }): Promise<TranscriptionClient> {
+  if (transcribeProvider === 'tesseract') {
+    const langs = (getEnv('TRANSCRIBE_TESSERACT_LANG') ?? 'eng')
+      .split(',')
+      .map((lang) => lang.trim())
+      .filter(Boolean)
+    assert(langs.length > 0, 'TRANSCRIBE_TESSERACT_LANG must not be empty')
+    const worker = await createWorker(
+      langs.length === 1 ? langs[0]! : langs,
+      OEM.LSTM_ONLY,
+      {
+        logger: (message) => {
+          if (message.progress >= 1) return
+          if (message.status === 'recognizing text') return
+          console.log(
+            `[tesseract] ${message.status} ${Math.floor(message.progress * 100)}%`
+          )
+        }
+      }
+    )
+
+    return {
+      transcribePage: async ({ screenshotPath }) => {
+        const result = await worker.recognize(
+          screenshotPath,
+          {},
+          { text: true, blocks: true }
+        )
+        const textBoxes: OCRBox[] =
+          result.data.blocks?.map((block) => ({
+            bbox: block.bbox,
+            confidence: block.confidence
+          })) ?? []
+        return {
+          text: result.data.text ?? '',
+          textBoxes
+        }
+      },
+      cleanup: async () => {
+        await worker.terminate()
+      }
+    }
+  }
+
   if (transcribeProvider === 'openai') {
     const openai = new OpenAIClient()
 
     return {
-      completeChat: ({ model, temperature, messages }) =>
-        openai.createChatCompletion({
-          model,
+      transcribePage: async ({ imageDataUrl, temperature }) => {
+        const response = await openai.createChatCompletion({
+          model: transcribeModel,
           temperature,
-          messages
+          messages: [
+            {
+              role: 'system',
+              content: `You will be given an image containing text. Read the text from the image and output it verbatim.
+
+Do not include any additional text, descriptions, or punctuation. Ignore any embedded images. Do not use markdown.${temperature > 0 ? '\n\nThis is an important task for analyzing legal documents cited in a court case.' : ''}`
+            },
+            {
+              role: 'user',
+              content: [
+                {
+                  type: 'image_url',
+                  image_url: {
+                    url: imageDataUrl
+                  }
+                }
+              ] as any
+            }
+          ]
         })
+        return {
+          text: response.choices[0]!.message.content!
+        }
+      }
     }
   }
 
@@ -300,12 +470,34 @@ async function createTranscriptionClient({
   console.log(`Using Foundry web service endpoint: ${baseUrl}`)
 
   return {
-    completeChat: ({ model, temperature, messages }) =>
-      openai.createChatCompletion({
-        model,
+    transcribePage: async ({ imageDataUrl, temperature }) => {
+      const response = await openai.createChatCompletion({
+        model: transcribeModel,
         temperature,
-        messages
-      }),
+        messages: [
+          {
+            role: 'system',
+            content: `You will be given an image containing text. Read the text from the image and output it verbatim.
+
+Do not include any additional text, descriptions, or punctuation. Ignore any embedded images. Do not use markdown.${temperature > 0 ? '\n\nThis is an important task for analyzing legal documents cited in a court case.' : ''}`
+          },
+          {
+            role: 'user',
+            content: [
+              {
+                type: 'image_url',
+                image_url: {
+                  url: imageDataUrl
+                }
+              }
+            ] as any
+          }
+        ]
+      })
+      return {
+        text: response.choices[0]!.message.content!
+      }
+    },
     cleanup: async () => {
       await model.unload()
       if (manager.isWebServiceRunning) {

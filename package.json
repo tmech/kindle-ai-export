@@ -16,6 +16,7 @@
   "type": "module",
   "scripts": {
     "test": "run-s test:*",
+    "test:unit": "vitest run",
     "test:format": "prettier --check \"**/*.{js,ts,tsx}\"",
     "test:lint": "eslint .",
     "test:typecheck": "tsc --noEmit",
@@ -41,6 +42,7 @@
     "sort-keys": "^6.0.0",
     "tar": "^7.5.1",
     "tempy": "^3.1.0",
+    "tesseract.js": "^7.0.0",
     "type-fest": "^5.1.0",
     "unrealspeech-api": "^1.0.2"
   },
