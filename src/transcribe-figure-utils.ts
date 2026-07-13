@@ -18,6 +18,7 @@ type FigureThresholds = Partial<{
   minFigureEdge: number
   minFigureStdev: number
   textConfidenceThreshold: number
+  maxFiguresPerPage: number
 }>
 
 export async function detectAndExtractFigureRegions({
@@ -71,6 +72,14 @@ export async function detectAndExtractFigureRegions({
       min: 0,
       max: 100
     })
+  const maxFiguresPerPage = Math.floor(
+    thresholds?.maxFiguresPerPage ??
+      getNumberEnv('TRANSCRIBE_MAX_FIGURES_PER_PAGE', {
+        defaultValue: 3,
+        min: 1,
+        max: 20
+      })
+  )
   const margin = Math.max(
     6,
     Math.floor(Math.min(imageWidth, imageHeight) * 0.01)
@@ -80,62 +89,70 @@ export async function detectAndExtractFigureRegions({
     .filter((box) => box.confidence >= textConfidenceThreshold)
     .map(({ bbox }) => normalizeBBox(bbox, imageWidth, imageHeight))
     .filter((bbox) => bboxArea(bbox) > 0)
-  if (!normalizedTextBoxes.length) {
-    return []
-  }
-
-  const textBounds = mergeBBoxes(normalizedTextBoxes)
-  const textBands = mergeVerticalIntervals(
-    normalizedTextBoxes.map((bbox) => ({
-      y0: Math.max(0, bbox.y0 - margin),
-      y1: Math.min(imageHeight, bbox.y1 + margin)
-    }))
-  )
-
+  const hasAnchoredTextBoxes = normalizedTextBoxes.length > 0
   const candidates: BBox[] = []
-  const top = makeBBox({
-    x0: 0,
-    y0: 0,
-    x1: imageWidth,
-    y1: textBounds.y0 - margin
-  })
-  if (top) candidates.push(top)
-
-  const bottom = makeBBox({
-    x0: 0,
-    y0: textBounds.y1 + margin,
-    x1: imageWidth,
-    y1: imageHeight
-  })
-  if (bottom) candidates.push(bottom)
-
-  const left = makeBBox({
-    x0: 0,
-    y0: textBounds.y0,
-    x1: textBounds.x0 - margin,
-    y1: textBounds.y1
-  })
-  if (left) candidates.push(left)
-
-  const right = makeBBox({
-    x0: textBounds.x1 + margin,
-    y0: textBounds.y0,
-    x1: imageWidth,
-    y1: textBounds.y1
-  })
-  if (right) candidates.push(right)
-
-  for (let i = 0; i < textBands.length - 1; i++) {
-    const band = textBands[i]!
-    const nextBand = textBands[i + 1]!
-    const gap = makeBBox({
+  if (!hasAnchoredTextBoxes) {
+    const fullPage = makeBBox({
       x0: 0,
-      y0: band.y1,
+      y0: 0,
       x1: imageWidth,
-      y1: nextBand.y0
+      y1: imageHeight
     })
-    if (gap) {
-      candidates.push(gap)
+    if (fullPage) {
+      candidates.push(fullPage)
+    }
+  } else {
+    const textBounds = mergeBBoxes(normalizedTextBoxes)
+    const textBands = mergeVerticalIntervals(
+      normalizedTextBoxes.map((bbox) => ({
+        y0: Math.max(0, bbox.y0 - margin),
+        y1: Math.min(imageHeight, bbox.y1 + margin)
+      }))
+    )
+    const top = makeBBox({
+      x0: 0,
+      y0: 0,
+      x1: imageWidth,
+      y1: textBounds.y0 - margin
+    })
+    if (top) candidates.push(top)
+
+    const bottom = makeBBox({
+      x0: 0,
+      y0: textBounds.y1 + margin,
+      x1: imageWidth,
+      y1: imageHeight
+    })
+    if (bottom) candidates.push(bottom)
+
+    const left = makeBBox({
+      x0: 0,
+      y0: textBounds.y0,
+      x1: textBounds.x0 - margin,
+      y1: textBounds.y1
+    })
+    if (left) candidates.push(left)
+
+    const right = makeBBox({
+      x0: textBounds.x1 + margin,
+      y0: textBounds.y0,
+      x1: imageWidth,
+      y1: textBounds.y1
+    })
+    if (right) candidates.push(right)
+
+    for (let i = 0; i < textBands.length - 1; i++) {
+      const band = textBands[i]!
+      const nextBand = textBands[i + 1]!
+      const gap = makeBBox({
+        x0: 0,
+        y0: band.y1,
+        x1: imageWidth,
+        y1: nextBand.y0
+      })
+      if (gap) {
+        candidates.push(gap)
+      }
     }
   }
 
@@ -144,7 +161,11 @@ export async function detectAndExtractFigureRegions({
   )
 
   await fs.mkdir(figuresDir, { recursive: true })
-  const figures: FigureRegion[] = []
+  const scoredCandidates: Array<{
+    candidate: BBox
+    score: number
+    maxStdev: number
+  }> = []
   for (const candidate of deduped) {
     const width = candidate.x1 - candidate.x0
     const height = candidate.y1 - candidate.y0
@@ -154,6 +175,22 @@ export async function detectAndExtractFigureRegions({
     if (areaRatio < minFigureAreaRatio) continue
     const aspectRatio = width / height
     if (aspectRatio > 8 || aspectRatio < 0.125) continue
+    if (isLikelyFramingBand(candidate, imageWidth, imageHeight)) continue
+    const touchingEdges = countTouchingEdges(candidate, imageWidth, imageHeight)
+    const widthRatio = width / imageWidth
+    const heightRatio = height / imageHeight
+    const edgeAnchoredWideBand =
+      widthRatio > 0.9 && (candidate.y0 <= 0 || candidate.y1 >= imageHeight)
+    const edgeAnchoredTallBand =
+      heightRatio > 0.9 && (candidate.x0 <= 0 || candidate.x1 >= imageWidth)
+    if (
+      hasAnchoredTextBoxes &&
+      touchingEdges >= 2 &&
+      (edgeAnchoredWideBand || edgeAnchoredTallBand)
+    ) {
+      continue
+    }
+    if (hasAnchoredTextBoxes && touchingEdges >= 2 && areaRatio < 0.25) continue
 
     const stats = await sharp(screenshotPath)
       .extract({
@@ -165,16 +202,44 @@ export async function detectAndExtractFigureRegions({
       .stats()
     const maxStdev = Math.max(...stats.channels.map((c) => c.stdev))
     if (maxStdev < minFigureStdev) continue
+    const score = scoreCandidate({
+      candidate,
+      imageWidth,
+      imageHeight,
+      maxStdev,
+      touchingEdges
+    })
+
+    scoredCandidates.push({
+      candidate,
+      score,
+      maxStdev
+    })
+  }
+
+  const figures: FigureRegion[] = []
+  for (const { candidate } of scoredCandidates
+    .toSorted((a, b) => b.score - a.score || b.maxStdev - a.maxStdev)
+    .slice(0, maxFiguresPerPage)) {
+    const width = candidate.x1 - candidate.x0
+    const height = candidate.y1 - candidate.y0
+    const adjustedCandidate = insetBBox(
+      candidate,
+      Math.floor(Math.min(width, height) * 0.04)
+    )
+    const effective = adjustedCandidate ?? candidate
+    const effectiveWidth = effective.x1 - effective.x0
+    const effectiveHeight = effective.y1 - effective.y0
 
     const figure = figures.length + 1
     const figureFileName = `${String(index).padStart(4, '0')}-${String(figure).padStart(2, '0')}.png`
     const absoluteFigurePath = path.join(figuresDir, figureFileName)
     await sharp(screenshotPath)
       .extract({
-        left: candidate.x0,
-        top: candidate.y0,
-        width,
-        height
+        left: effective.x0,
+        top: effective.y0,
+        width: effectiveWidth,
+        height: effectiveHeight
       })
       .png()
       .toFile(absoluteFigurePath)
@@ -183,8 +248,8 @@ export async function detectAndExtractFigureRegions({
       index,
       page,
       figure,
-      areaRatio,
-      bbox: candidate,
+      areaRatio: bboxArea(effective) / (imageWidth * imageHeight),
+      bbox: effective,
       screenshot: screenshotPath,
       imagePath: path.join('figures', figureFileName)
     })
@@ -316,4 +381,70 @@ function makeBBox(bbox: BBox): BBox | undefined {
 
 function clamp(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value))
+}
+
+function isLikelyFramingBand(
+  bbox: BBox,
+  imageWidth: number,
+  imageHeight: number
+): boolean {
+  const widthRatio = (bbox.x1 - bbox.x0) / imageWidth
+  const heightRatio = (bbox.y1 - bbox.y0) / imageHeight
+  if (widthRatio > 0.92 && heightRatio < 0.18) return true
+  if (heightRatio > 0.92 && widthRatio < 0.18) return true
+  return false
+}
+
+function countTouchingEdges(
+  bbox: BBox,
+  imageWidth: number,
+  imageHeight: number
+): number {
+  let edges = 0
+  if (bbox.x0 <= 0) edges++
+  if (bbox.y0 <= 0) edges++
+  if (bbox.x1 >= imageWidth) edges++
+  if (bbox.y1 >= imageHeight) edges++
+  return edges
+}
+
+function scoreCandidate({
+  candidate,
+  imageWidth,
+  imageHeight,
+  maxStdev,
+  touchingEdges
+}: {
+  candidate: BBox
+  imageWidth: number
+  imageHeight: number
+  maxStdev: number
+  touchingEdges: number
+}): number {
+  const area = bboxArea(candidate)
+  const areaRatio = area / (imageWidth * imageHeight)
+  const centerX = (candidate.x0 + candidate.x1) / 2
+  const centerY = (candidate.y0 + candidate.y1) / 2
+  const imageCenterX = imageWidth / 2
+  const imageCenterY = imageHeight / 2
+  const dx = Math.abs(centerX - imageCenterX) / Math.max(1, imageCenterX)
+  const dy = Math.abs(centerY - imageCenterY) / Math.max(1, imageCenterY)
+  const centeredness = 1 - Math.min(1, Math.hypot(dx, dy))
+  const stdevScore = Math.min(1, maxStdev / 64)
+  const edgePenalty = touchingEdges * 0.1
+  return areaRatio * 0.55 + stdevScore * 0.35 + centeredness * 0.2 - edgePenalty
+}
+
+function insetBBox(bbox: BBox, inset: number): BBox | undefined {
+  if (inset <= 0) return bbox
+  const next: BBox = {
+    x0: bbox.x0 + inset,
+    y0: bbox.y0 + inset,
+    x1: bbox.x1 - inset,
+    y1: bbox.y1 - inset
+  }
+  if (next.x1 <= next.x0 || next.y1 <= next.y0) {
+    return
+  }
+  return next
 }

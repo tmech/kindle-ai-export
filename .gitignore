@@ -44,3 +44,5 @@ old/
 out/
 
 .eslintcache
+
+*.zip

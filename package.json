@@ -15,6 +15,7 @@
   },
   "type": "module",
   "scripts": {
+    "kindle:library": "tsx src/list-kindle-library.ts",
     "test": "run-s test:*",
     "test:unit": "vitest run",
     "test:format": "prettier --check \"**/*.{js,ts,tsx}\"",

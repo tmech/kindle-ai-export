@@ -14,6 +14,7 @@
   - [Why is this necessary?](#why-is-this-necessary)
 - [Usage](#usage)
   - [Setup Env Vars](#setup-env-vars)
+  - [List Kindle Library (Optional)](#list-kindle-library-optional)
   - [Extract Kindle Book](#extract-kindle-book)
   - [Transcribe Book Content](#transcribe-book-content)
   - [(Optional) Export Book as PDF](#optional-export-book-as-pdf)
@@ -152,14 +153,15 @@ Make sure you have `node >= 20` and [pnpm](https://pnpm.io) installed.
 1. Clone this repo
 2. Run `pnpm install`
 3. Set up environment variables ([details](#setup-env-vars))
-4. Run `src/extract-kindle-book.ts` ([details](#extract-kindle-book))
-5. Run `src/transcribe-book-content.ts` ([details](#transcribe-book-content))
+4. (Optional) Run `src/list-kindle-library.ts` to export your current library for search / ASIN lookup ([details](#list-kindle-library-optional))
+5. Run `src/extract-kindle-book.ts` ([details](#extract-kindle-book))
+6. Run `src/transcribe-book-content.ts` ([details](#transcribe-book-content))
    - Default flow: `TRANSCRIBE_PROVIDER=foundrylocal` (no OpenAI key needed for transcription)
    - Optional: use `TRANSCRIBE_PROVIDER=openai` if you prefer OpenAI-hosted transcription
-6. (Optional) Run `src/export-book-pdf.ts` ([details](#optional-export-book-as-pdf))
-7. (Optional) Export book as EPUB ([details](#optional-export-book-as-epub))
-8. (Optional) Run `src/export-book-markdown.ts` ([details](#optional-export-book-as-markdown))
-9. (Optional) Run `src/export-book-audio.ts` ([details](#optional-export-book-as-ai-narrated-audiobook-))
+7. (Optional) Run `src/export-book-pdf.ts` ([details](#optional-export-book-as-pdf))
+8. (Optional) Export book as EPUB ([details](#optional-export-book-as-epub))
+9. (Optional) Run `src/export-book-markdown.ts` ([details](#optional-export-book-as-markdown))
+10. (Optional) Run `src/export-book-audio.ts` ([details](#optional-export-book-as-ai-narrated-audiobook-))
 
 ### Setup Env Vars
 
@@ -190,6 +192,28 @@ OPENAI_API_KEY=
 ```
 
 You can find your book's [ASIN](https://en.wikipedia.org/wiki/Amazon_Standard_Identification_Number) (Amazon ID) by visiting [read.amazon.com](https://read.amazon.com) and clicking on the book you want to export. The resulting URL will look like `https://read.amazon.com/?asin=B0819W19WD&ref_=kwl_kr_iv_rec_2`, with `B0819W19WD` being the ASIN in this case.
+
+### List Kindle Library (Optional)
+
+```sh
+npx tsx src/list-kindle-library.ts
+```
+
+Or via script:
+
+```sh
+pnpm kindle:library
+```
+
+- Logs into your Kindle web reader account and enumerates books in your current library view.
+- Saves JSON output to `out/kindle-library.json` and a readable list to `out/kindle-library.md`.
+- Supports optional client-side filtering and limiting:
+
+```sh
+npx tsx src/list-kindle-library.ts --query "reynolds" --limit 20
+```
+
+- Useful for selecting a book/ASIN before running extraction.
 
 ### Extract Kindle Book
 

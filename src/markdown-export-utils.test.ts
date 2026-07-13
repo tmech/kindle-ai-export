@@ -5,7 +5,8 @@ import {
   buildChapterRanges,
   type ChapterRange,
   renderChapterMarkdown,
-  renderFrontmatter} from './markdown-export-utils'
+  renderFrontmatter
+} from './markdown-export-utils'
 
 describe('buildChapterRanges', () => {
   it('uses TOC boundaries and de-dupes slugs', () => {
@@ -123,8 +124,259 @@ describe('renderChapterMarkdown', () => {
     expect(markdown).toContain('note_type: "kindle-chapter"')
     expect(markdown).toContain('chapter_number: 1')
     expect(markdown).toContain('# Chapter 1')
-    expect(markdown).toContain('Hello\n\nWorld')
+    expect(markdown).toContain('Hello World')
     expect(markdown).toContain('![Figure 1.1](../figures/0000-01.png)')
+  })
+
+  it('applies line-based markdown conventions', () => {
+    const chapter: ChapterRange = {
+      chapterNumber: 1,
+      title: 'Chapter 1',
+      depth: 0,
+      startIndex: 0,
+      endIndex: 1,
+      slug: 'chapter-1'
+    }
+    const chunks: ContentChunk[] = [
+      {
+        index: 0,
+        page: 1,
+        text: [
+          'PROLOGUE',
+          'This is a wrapped',
+          'paragraph across lines.',
+          '',
+          '« first bullet',
+          '«+ second bullet',
+          '',
+          '“Quoted line.”',
+          '-- Ada Lovelace'
+        ].join('\n'),
+        screenshot: 'out\\B\\pages\\0.png'
+      }
+    ]
+
+    const markdown = renderChapterMarkdown({
+      chapter,
+      chunks,
+      figuresByIndex: new Map(),
+      outDir: 'out\\B',
+      chaptersDir: 'out\\B\\chapters'
+    })
+
+    expect(markdown).toContain('## PROLOGUE')
+    expect(markdown).toContain('This is a wrapped paragraph across lines.')
+    expect(markdown).toContain('- first bullet\n- second bullet')
+    expect(markdown).toContain('> “Quoted line.”\n> — Ada Lovelace')
+  })
+
+  it('keeps wrapped text together across accidental blank lines', () => {
+    const chapter: ChapterRange = {
+      chapterNumber: 1,
+      title: 'Chapter 1',
+      depth: 0,
+      startIndex: 0,
+      endIndex: 1,
+      slug: 'chapter-1'
+    }
+    const chunks: ContentChunk[] = [
+      {
+        index: 0,
+        page: 1,
+        text: ['This sentence ends with and', '', 'then continues here.'].join(
+          '\n'
+        ),
+        screenshot: 'out\\B\\pages\\0.png'
+      }
+    ]
+
+    const markdown = renderChapterMarkdown({
+      chapter,
+      chunks,
+      figuresByIndex: new Map(),
+      outDir: 'out\\B',
+      chaptersDir: 'out\\B\\chapters'
+    })
+
+    expect(markdown).toContain(
+      'This sentence ends with and then continues here.'
+    )
+  })
+
+  it('merges split paragraphs across chunk boundaries', () => {
+    const chapter: ChapterRange = {
+      chapterNumber: 1,
+      title: 'Chapter 1',
+      depth: 0,
+      startIndex: 0,
+      endIndex: 2,
+      slug: 'chapter-1'
+    }
+    const chunks: ContentChunk[] = [
+      {
+        index: 0,
+        page: 1,
+        text: 'We saw many stocks hit the 52-week-high list and',
+        screenshot: 'out\\B\\pages\\0.png'
+      },
+      {
+        index: 1,
+        page: 1,
+        text: 'then skyrocket even higher in price.',
+        screenshot: 'out\\B\\pages\\1.png'
+      }
+    ]
+
+    const markdown = renderChapterMarkdown({
+      chapter,
+      chunks,
+      figuresByIndex: new Map(),
+      outDir: 'out\\B',
+      chaptersDir: 'out\\B\\chapters'
+    })
+
+    expect(markdown).toContain(
+      'We saw many stocks hit the 52-week-high list and then skyrocket even higher in price.'
+    )
+  })
+
+  it('extracts inline numbered list sequences into markdown ordered lists', () => {
+    const chapter: ChapterRange = {
+      chapterNumber: 1,
+      title: 'Chapter 1',
+      depth: 0,
+      startIndex: 0,
+      endIndex: 1,
+      slug: 'chapter-1'
+    }
+    const chunks: ContentChunk[] = [
+      {
+        index: 0,
+        page: 1,
+        text: [
+          'The basic characteristics are: 1. Trend. First item.',
+          '2. Fundamentals. Second item. 3. Catalyst. Third item.'
+        ].join(' '),
+        screenshot: 'out\\B\\pages\\0.png'
+      }
+    ]
+
+    const markdown = renderChapterMarkdown({
+      chapter,
+      chunks,
+      figuresByIndex: new Map(),
+      outDir: 'out\\B',
+      chaptersDir: 'out\\B\\chapters'
+    })
+
+    expect(markdown).toContain('The basic characteristics are:')
+    expect(markdown).toContain(
+      '1. Trend. First item.\n2. Fundamentals. Second item.\n3. Catalyst. Third item.'
+    )
+  })
+
+  it('fixes common OCR | pronoun errors conservatively', () => {
+    const chapter: ChapterRange = {
+      chapterNumber: 1,
+      title: 'Chapter 1',
+      depth: 0,
+      startIndex: 0,
+      endIndex: 1,
+      slug: 'chapter-1'
+    }
+    const chunks: ContentChunk[] = [
+      {
+        index: 0,
+        page: 1,
+        text: [
+          '| began to learn.',
+          "Then |'ve improved.",
+          '',
+          '| col1 | col2 |'
+        ].join('\n'),
+        screenshot: 'out\\B\\pages\\0.png'
+      }
+    ]
+
+    const markdown = renderChapterMarkdown({
+      chapter,
+      chunks,
+      figuresByIndex: new Map(),
+      outDir: 'out\\B',
+      chaptersDir: 'out\\B\\chapters'
+    })
+
+    expect(markdown).toContain("I began to learn. Then I've improved.")
+    expect(markdown).toContain('| col1 | col2 |')
+  })
+
+  it('fixes OCR | pronoun when token spans chunk boundaries', () => {
+    const chapter: ChapterRange = {
+      chapterNumber: 1,
+      title: 'Chapter 1',
+      depth: 0,
+      startIndex: 0,
+      endIndex: 2,
+      slug: 'chapter-1'
+    }
+    const chunks: ContentChunk[] = [
+      {
+        index: 0,
+        page: 1,
+        text: 'every book |',
+        screenshot: 'out\\B\\pages\\0.png'
+      },
+      {
+        index: 1,
+        page: 1,
+        text: 'could get my hands on',
+        screenshot: 'out\\B\\pages\\1.png'
+      }
+    ]
+
+    const markdown = renderChapterMarkdown({
+      chapter,
+      chunks,
+      figuresByIndex: new Map(),
+      outDir: 'out\\B',
+      chaptersDir: 'out\\B\\chapters'
+    })
+
+    expect(markdown).toContain('every book I could get my hands on')
+  })
+
+  it('honors paragraph boundary hints captured during transcription', () => {
+    const chapter: ChapterRange = {
+      chapterNumber: 1,
+      title: 'Chapter 1',
+      depth: 0,
+      startIndex: 0,
+      endIndex: 1,
+      slug: 'chapter-1'
+    }
+    const chunks: ContentChunk[] = [
+      {
+        index: 0,
+        page: 1,
+        text: ['this should end first para', 'next para starts here'].join(
+          '\n'
+        ),
+        paragraphStartLineIndices: [1],
+        screenshot: 'out\\B\\pages\\0.png'
+      }
+    ]
+
+    const markdown = renderChapterMarkdown({
+      chapter,
+      chunks,
+      figuresByIndex: new Map(),
+      outDir: 'out\\B',
+      chaptersDir: 'out\\B\\chapters'
+    })
+
+    expect(markdown).toContain(
+      'this should end first para\n\nnext para starts here'
+    )
   })
 })
 

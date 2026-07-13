@@ -32,9 +32,21 @@ export interface ContentChunk {
   page: number
   text: string
   screenshot: string
+  paragraphStartLineIndices?: number[]
 }
 
 export interface OCRBox {
+  bbox: {
+    x0: number
+    y0: number
+    x1: number
+    y1: number
+  }
+  confidence: number
+}
+
+export interface OCRLine {
+  text: string
   bbox: {
     x0: number
     y0: number

@@ -15,6 +15,7 @@ import type {
   ContentChunk,
   FigureRegion,
   OCRBox,
+  OCRLine,
   TocItem
 } from './types'
 import { detectAndExtractFigureRegions } from './transcribe-figure-utils'
@@ -30,6 +31,7 @@ type TranscriptionClient = {
   }) => Promise<{
     text: string
     textBoxes?: OCRBox[]
+    ocrLines?: OCRLine[]
   }>
   cleanup?: () => Promise<void>
 }
@@ -156,78 +158,22 @@ async function main() {
 
           try {
             let retries = 0
-
-            console.log(
-              `Transcribing page ${page} (${completedPages}/${totalPages} complete, ${totalPages - completedPages} remaining)...`
-            )
-
-            do {
-              const transcription = await transcriptionClient.transcribePage({
-                screenshotPath: screenshot,
-                imageDataUrl: screenshotBase64,
-                temperature: retries < 2 ? 0 : 0.5
-              })
-
-              const rawText = transcription.text
-              let text = rawText
-                .replace(/^\s*\d+\s*$\n+/m, '')
-                .replaceAll(/^\s*/gm, '')
-                .replaceAll(/\s*$/gm, '')
-
-              ++retries
-
-              if (!text) {
-                if (retries >= maxRetries) {
-                  throw new Error(
-                    `Model returned no text too many times (${retries} times)`
-                  )
-                }
-                continue
-              }
-              if (text.length < 100 && /i'm sorry/i.test(text)) {
-                if (retries >= maxRetries) {
-                  throw new Error(
-                    `Model refused too many times (${retries} times): ${text}`
-                  )
-                }
-
-                console.warn('retrying refusal...', {
-                  index,
-                  text,
-                  screenshot
-                })
-                continue
-              }
-
-              const prevPageChunk = metadata.pages[index - 1]
-              if (prevPageChunk && prevPageChunk.page !== page) {
-                const tocItem = pageToTocItemMap[page]
-                if (tocItem) {
-                  text = text.replace(
-                    // eslint-disable-next-line security/detect-non-literal-regexp
-                    new RegExp(`^${tocItem.label}\\s*`, 'i'),
-                    ''
-                  )
-                }
-              }
-
+            const persistTranscription = async ({
+              text,
+              paragraphStartLineIndices,
+              figureRegions
+            }: {
+              text: string
+              paragraphStartLineIndices?: number[]
+              figureRegions: FigureRegion[]
+            }) => {
               const result: ContentChunk = {
                 index,
                 page,
                 text,
-                screenshot
+                screenshot,
+                paragraphStartLineIndices
               }
-
-              const figureRegions =
-                detectFigures && transcription.textBoxes?.length
-                  ? await detectAndExtractFigureRegions({
-                      index,
-                      page,
-                      screenshotPath: screenshot,
-                      textBoxes: transcription.textBoxes,
-                      figuresDir
-                    })
-                  : []
 
               const persistResult = persistQueue.then(async () => {
                 contentByIndex.set(index, result)
@@ -279,6 +225,100 @@ async function main() {
                 )
               }
               console.log(result)
+            }
+
+            console.log(
+              `Transcribing page ${page} (${completedPages}/${totalPages} complete, ${totalPages - completedPages} remaining)...`
+            )
+
+            do {
+              const transcription = await transcriptionClient.transcribePage({
+                screenshotPath: screenshot,
+                imageDataUrl: screenshotBase64,
+                temperature: retries < 2 ? 0 : 0.5
+              })
+
+              const rawText = transcription.text
+              let text = rawText
+                .replace(/^\s*\d+\s*$\n+/m, '')
+                .replaceAll(/^\s*/gm, '')
+                .replaceAll(/\s*$/gm, '')
+
+              ++retries
+
+              if (!text) {
+                if (retries >= maxRetries) {
+                  if (detectFigures) {
+                    console.warn(
+                      `No text extracted after ${retries} attempts for page ${page}; treating as image-only page.`
+                    )
+                    const figureRegions = await detectAndExtractFigureRegions({
+                      index,
+                      page,
+                      screenshotPath: screenshot,
+                      textBoxes: transcription.textBoxes ?? [],
+                      figuresDir
+                    })
+                    await persistTranscription({
+                      text: '',
+                      paragraphStartLineIndices: undefined,
+                      figureRegions
+                    })
+                    return
+                  }
+                  throw new Error(
+                    `Model returned no text too many times (${retries} times)`
+                  )
+                }
+                continue
+              }
+              if (text.length < 100 && /i'm sorry/i.test(text)) {
+                if (retries >= maxRetries) {
+                  throw new Error(
+                    `Model refused too many times (${retries} times): ${text}`
+                  )
+                }
+
+                console.warn('retrying refusal...', {
+                  index,
+                  text,
+                  screenshot
+                })
+                continue
+              }
+
+              const prevPageChunk = metadata.pages[index - 1]
+              if (prevPageChunk && prevPageChunk.page !== page) {
+                const tocItem = pageToTocItemMap[page]
+                if (tocItem) {
+                  text = text.replace(
+                    // eslint-disable-next-line security/detect-non-literal-regexp
+                    new RegExp(`^${tocItem.label}\\s*`, 'i'),
+                    ''
+                  )
+                }
+              }
+
+              const figureRegions = detectFigures
+                ? await detectAndExtractFigureRegions({
+                    index,
+                    page,
+                    screenshotPath: screenshot,
+                    textBoxes: transcription.textBoxes ?? [],
+                    figuresDir
+                  })
+                : []
+              const paragraphStartLineIndices =
+                inferParagraphStartLineIndicesFromText(text) ??
+                inferParagraphStartLineIndices({
+                  text,
+                  ocrLines: transcription.ocrLines
+                })
+              await persistTranscription({
+                text,
+                paragraphStartLineIndices,
+                figureRegions
+              })
 
               return
             } while (true)
@@ -395,14 +435,17 @@ async function createTranscriptionClient({
           {},
           { text: true, blocks: true }
         )
+        const dataAny = result.data as any
         const textBoxes: OCRBox[] =
           result.data.blocks?.map((block) => ({
             bbox: block.bbox,
             confidence: block.confidence
           })) ?? []
+        const ocrLines = buildOcrLinesFromTesseractData(dataAny)
         return {
           text: result.data.text ?? '',
-          textBoxes
+          textBoxes,
+          ocrLines
         }
       },
       cleanup: async () => {
@@ -643,6 +686,221 @@ function formatDurationMs(ms: number): string {
   }
 
   return `${minutes}m ${seconds}s`
+}
+
+function inferParagraphStartLineIndices({
+  text,
+  ocrLines
+}: {
+  text: string
+  ocrLines?: OCRLine[]
+}): number[] | undefined {
+  if (!ocrLines?.length) {
+    return inferParagraphStartLineIndicesFromText(text)
+  }
+
+  const textLines = text
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean)
+  const normalizedOcrLines = ocrLines
+    .map((line) => ({
+      ...line,
+      text: line.text.replaceAll(/\s+/g, ' ').trim()
+    }))
+    .filter((line) => line.text.length > 0)
+    .toSorted((a, b) => a.bbox.y0 - b.bbox.y0 || a.bbox.x0 - b.bbox.x0)
+
+  if (textLines.length < 3 || normalizedOcrLines.length < 3) return
+  const comparableCount = normalizedOcrLines.length
+  const heights: number[] = []
+  const gaps: number[] = []
+  for (let i = 0; i < comparableCount; i++) {
+    const current = normalizedOcrLines[i]!
+    heights.push(Math.max(1, current.bbox.y1 - current.bbox.y0))
+    if (i + 1 < comparableCount) {
+      const next = normalizedOcrLines[i + 1]!
+      gaps.push(Math.max(0, next.bbox.y0 - current.bbox.y1))
+    }
+  }
+  if (!gaps.length || !heights.length) return
+
+  const medianHeight = median(heights)
+  const medianGap = median(gaps)
+  const threshold = Math.max(6, medianGap * 1.75, medianHeight * 0.85)
+  const countsAreClose =
+    Math.abs(textLines.length - normalizedOcrLines.length) <= 2
+
+  const starts = new Set<number>()
+  for (let i = 0; i < comparableCount - 1; i++) {
+    const current = normalizedOcrLines[i]!
+    const next = normalizedOcrLines[i + 1]!
+    const gap = Math.max(0, next.bbox.y0 - current.bbox.y1)
+    if (gap > threshold) {
+      const mappedIndex = countsAreClose
+        ? i + 1
+        : Math.round(((i + 1) / comparableCount) * textLines.length)
+      starts.add(Math.max(1, Math.min(textLines.length - 1, mappedIndex)))
+    }
+  }
+
+  const output = Array.from(starts)
+    .filter((index) => index > 0 && index < textLines.length)
+    .toSorted((a, b) => a - b)
+
+  if (output.length) {
+    return output
+  }
+
+  return inferParagraphStartLineIndicesFromText(text)
+}
+
+function median(values: number[]): number {
+  if (!values.length) return 0
+  const sorted = values.toSorted((a, b) => a - b)
+  const mid = Math.floor(sorted.length / 2)
+  if (sorted.length % 2 === 1) {
+    return sorted[mid]!
+  }
+  return (sorted[mid - 1]! + sorted[mid]!) / 2
+}
+
+function buildOcrLinesFromTesseractData(data: any): OCRLine[] {
+  const lineEntries = (data.lines as any[] | undefined)
+    ?.map((line) => ({
+      text: `${line.text ?? ''}`,
+      bbox: line.bbox,
+      confidence: Number(line.confidence ?? 0)
+    }))
+    .filter((line) => line.text.trim().length > 0)
+  if (lineEntries?.length) {
+    return lineEntries
+  }
+
+  const words = (data.words as any[] | undefined)
+    ?.map((word) => ({
+      text: `${word.text ?? ''}`.trim(),
+      bbox: word.bbox,
+      confidence: Number(word.confidence ?? 0)
+    }))
+    .filter(
+      (word) =>
+        word.text.length > 0 &&
+        Number.isFinite(word.bbox?.x0) &&
+        Number.isFinite(word.bbox?.y0) &&
+        Number.isFinite(word.bbox?.x1) &&
+        Number.isFinite(word.bbox?.y1)
+    )
+    .toSorted((a, b) => a.bbox.y0 - b.bbox.y0 || a.bbox.x0 - b.bbox.x0)
+  if (!words?.length) {
+    const blockEntries = (data.blocks as any[] | undefined)
+      ?.map((block) => ({
+        text: `${block.text ?? ''}`,
+        bbox: block.bbox,
+        confidence: Number(block.confidence ?? 0)
+      }))
+      .filter(
+        (block) =>
+          block.text.trim().length > 0 &&
+          Number.isFinite(block.bbox?.x0) &&
+          Number.isFinite(block.bbox?.y0) &&
+          Number.isFinite(block.bbox?.x1) &&
+          Number.isFinite(block.bbox?.y1)
+      )
+      .toSorted((a, b) => a.bbox.y0 - b.bbox.y0 || a.bbox.x0 - b.bbox.x0)
+    return blockEntries ?? []
+  }
+
+  const medianWordHeight = median(
+    words.map((word) => Math.max(1, word.bbox.y1 - word.bbox.y0))
+  )
+  const lineTolerance = Math.max(4, medianWordHeight * 0.6)
+  const lines: Array<{
+    words: Array<(typeof words)[number]>
+    centerY: number
+  }> = []
+  for (const word of words) {
+    const centerY = (word.bbox.y0 + word.bbox.y1) / 2
+    const current = lines.at(-1)
+    if (current && Math.abs(centerY - current.centerY) <= lineTolerance) {
+      current.words.push(word)
+      current.centerY =
+        (current.centerY * (current.words.length - 1) + centerY) /
+        current.words.length
+    } else {
+      lines.push({
+        words: [word],
+        centerY
+      })
+    }
+  }
+
+  return lines.map((line) => {
+    const sortedWords = line.words.toSorted((a, b) => a.bbox.x0 - b.bbox.x0)
+    const text = sortedWords
+      .map((word) => word.text)
+      .join(' ')
+      .trim()
+    return {
+      text,
+      confidence:
+        sortedWords.reduce((sum, word) => sum + word.confidence, 0) /
+        Math.max(1, sortedWords.length),
+      bbox: {
+        x0: Math.min(...sortedWords.map((word) => word.bbox.x0)),
+        y0: Math.min(...sortedWords.map((word) => word.bbox.y0)),
+        x1: Math.max(...sortedWords.map((word) => word.bbox.x1)),
+        y1: Math.max(...sortedWords.map((word) => word.bbox.y1))
+      }
+    } satisfies OCRLine
+  })
+}
+
+function inferParagraphStartLineIndicesFromText(
+  text: string
+): number[] | undefined {
+  const lines = text
+    .split('\n')
+    .map((line) => line.replaceAll(/\s+/g, ' ').trim())
+    .filter(Boolean)
+  if (lines.length < 3) return
+
+  const medianLen = median(
+    lines.map((line) => line.length).filter((len) => len > 0)
+  )
+  const starts = new Set<number>()
+  for (let i = 1; i < lines.length; i++) {
+    const prev = lines[i - 1]!
+    const current = lines[i]!
+    if (isLikelyHeadingLine(current) && !isLikelyHeadingLine(prev)) {
+      starts.add(i)
+      continue
+    }
+    if (!endsWithTerminalPunctuation(prev)) continue
+    if (!/^[A-Z“"‘']/.test(current)) continue
+    if (/^(And|Or|But|So|Yet|For|Nor)\b/.test(current)) continue
+    if (/^\d+\.\s/.test(current)) {
+      starts.add(i)
+      continue
+    }
+    if (prev.length <= medianLen * 0.95 || current.length <= medianLen * 0.95) {
+      starts.add(i)
+    }
+  }
+
+  const output = Array.from(starts).toSorted((a, b) => a - b)
+  return output.length ? output : undefined
+}
+
+function endsWithTerminalPunctuation(line: string): boolean {
+  return /[.!?]["'”’)]?$/.test(line)
+}
+
+function isLikelyHeadingLine(line: string): boolean {
+  const letters = line.match(/[A-Za-z]/g)
+  if (!letters || letters.length < 4) return false
+  if (line.length > 120) return false
+  return !/[a-z]/.test(line)
 }
 
 async function teeConsoleToFile(logFilePath: string): Promise<() => void> {
